@@ -294,8 +294,9 @@ bool bgdl_queue_start_next()
     const auto entry = entries.front();
 
     uint8_t rif[PKGI_PSM_RIF_SIZE];
-    char error[256];
-    if (pkgi_zrif_decode(entry.zrif.c_str(), rif, error, sizeof(error)))
+    char error[256] = {};
+    // pkgi_zrif_decode returns 1 on success, 0 on failure.
+    if (!pkgi_zrif_decode(entry.zrif.c_str(), rif, error, sizeof(error)))
     {
         LOGFE(
                 "[{}] dropped from the PKGj queue: {}",
@@ -738,8 +739,9 @@ void pkgi_install_selection([[maybe_unused]] Downloader& downloader)
         }
 
         uint8_t rif[PKGI_PSM_RIF_SIZE];
-        char message[256];
-        if (pkgi_zrif_decode(item->zrif.c_str(), rif, message, sizeof(message)))
+        char message[256] = {};
+        // pkgi_zrif_decode returns 1 on success, 0 on failure.
+        if (!pkgi_zrif_decode(item->zrif.c_str(), rif, message, sizeof(message)))
         {
             LOGFW(
                     "[{}] invalid license in the batch install: {}",

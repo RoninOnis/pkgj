@@ -11,15 +11,15 @@
 
 namespace
 {
-// OpenSSL, который поставляется с VitaSDK, собран без OPENSSL_THREADS: его
-// состояние RAND не защищено блокировками (CRYPTO_lock вызывается, но ни один
-// колбэк блокировки не зарегистрирован, поэтому он ничего не делает), а в
-// ssleay_rand_add() при этом остаётся assert(md_c[1] == md_count[1]).
-// Ассерт держится только пока энтропию добавляет один поток: PKGj запускает
-// несколько фетчеров одновременно (описания, обложки, скриншоты, проверка
-// обновлений), и при перекрытии двух TLS-рукопожатий он срабатывает →
-// abort() → udf #255 → падение приложения с C2-12828-1.
-// Поэтому через OpenSSL пропускаем ровно один поток за раз.
+// The OpenSSL build shipped with VitaSDK has no thread support
+// (OPENSSL_THREADS is not defined): CRYPTO_lock() is called but no locking
+// callback is ever registered, so it does nothing, and ssleay_rand_add()
+// still contains assert(md_c[1] == md_count[1]).  That assert only holds
+// while a single thread feeds entropy.  PKGj runs several fetchers at the
+// same time (descriptions, covers, screenshots, update checks); when two
+// TLS handshakes overlap the assert fires -> abort() -> newlib raise()
+// -> the Vita executes udf #255 -> the app dies with C2-12828-1.
+// So only one thread is allowed inside OpenSSL at a time.
 Mutex tls_mutex("pkgi_tls_mutex");
 
 // Certificate verification is enabled whenever the platform can do it.  Some
