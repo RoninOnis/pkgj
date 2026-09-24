@@ -270,7 +270,7 @@ void bgdl_queue_add(const BgdlQueueEntry& entry)
     entries.push_back(entry);
     bgdl_queue_save(entries);
     LOGF(
-            "[{}] added to the PKGj queue ({} install(s) waiting)",
+            "[{}] added to the PKGJ queue ({} install(s) waiting)",
             entry.content,
             bgdl_queue_size);
 }
@@ -299,7 +299,7 @@ bool bgdl_queue_start_next()
     if (!pkgi_zrif_decode(entry.zrif.c_str(), rif, error, sizeof(error)))
     {
         LOGFE(
-                "[{}] dropped from the PKGj queue: {}",
+                "[{}] dropped from the PKGJ queue: {}",
                 entry.content,
                 error);
         entries.erase(entries.begin());
@@ -315,7 +315,7 @@ bool bgdl_queue_start_next()
 
     entries.erase(entries.begin());
     bgdl_queue_save(entries);
-    LOGF("[{}] queued in LiveArea from the PKGj queue", entry.content);
+    LOGF("[{}] queued in LiveArea from the PKGJ queue", entry.content);
     return true;
 }
 
@@ -786,7 +786,7 @@ void pkgi_install_selection([[maybe_unused]] Downloader& downloader)
     }
 
     LOGF(
-            "batch install: {} queued in LiveArea, {} parked in the PKGj "
+            "batch install: {} queued in LiveArea, {} parked in the PKGJ "
             "queue, {} rejected",
             queued,
             parked,
@@ -802,8 +802,8 @@ void pkgi_install_selection([[maybe_unused]] Downloader& downloader)
     if (parked > 0)
     {
         text += fmt::format(
-                "{} install(s) are waiting for a free LiveArea slot - PKGj "
-                "will queue them automatically (keep PKGj open or restart it "
+                "{} install(s) are waiting for a free LiveArea slot - PKGJ "
+                "will queue them automatically (keep PKGJ open or restart it "
                 "later).{}",
                 parked,
                 !first_error.empty() ? "\n\n" : "");
@@ -1483,7 +1483,7 @@ void pkgi_do_head(void)
     const char* version = PKGI_VERSION;
 
     char title[256];
-    pkgi_snprintf(title, sizeof(title), "PKGj v%s", version);
+    pkgi_snprintf(title, sizeof(title), "PKGJ v%s", version);
     pkgi_draw_text(0, 0, PKGI_COLOR_TEXT_HEAD, title);
 
     pkgi_draw_rect(
@@ -1622,7 +1622,7 @@ void pkgi_do_tail(Downloader& downloader)
         pkgi_snprintf(
                 text,
                 sizeof(text),
-                "Idle - PKGj queue: %d waiting for LiveArea",
+                "Idle - PKGJ queue: %d waiting for LiveArea",
                 bgdl_queue_size);
     else
         pkgi_snprintf(text, sizeof(text), "Idle");
@@ -2032,7 +2032,7 @@ void pkgi_start_download(
                                         "LiveArea refused to queue {}:\n{}\n\n"
                                         "{} install(s) are already waiting in "
                                         "LiveArea.\n\nCancel or finish them in "
-                                        "the notifications panel, or let PKGj "
+                                        "the notifications panel, or let PKGJ "
                                         "wait - it will queue {} automatically "
                                         "as soon as the LiveArea queue is "
                                         "free.",
@@ -2041,12 +2041,12 @@ void pkgi_start_download(
                                         pending,
                                         item.name),
                                 {Response{
-                                         "Queue in PKGj and wait",
+                                         "Queue in PKGJ and wait",
                                          [queued_entry]() {
                                              bgdl_queue_add(queued_entry);
                                          }},
                                  Response{
-                                         "Download inside PKGj (keep it open)",
+                                         "Download inside PKGJ (keep it open)",
                                          [&downloader, direct_item]() {
                                              downloader.add(direct_item);
                                          }},
@@ -2063,7 +2063,7 @@ void pkgi_start_download(
                         pkgi_dialog_message(
                                 fmt::format(
                                         "LiveArea queue unavailable, downloading "
-                                        "{} inside PKGj instead.\n\n{}\n\nKeep PKGj "
+                                        "{} inside PKGJ instead.\n\n{}\n\nKeep PKGJ "
                                         "open until the download finishes.",
                                         item.name,
                                         livearea_error)
@@ -2096,7 +2096,7 @@ int main()
     {
         if (!pkgi_is_unsafe_mode())
             throw std::runtime_error(
-                    "PKGj requires unsafe mode to be enabled in HENkaku "
+                    "PKGJ requires unsafe mode to be enabled in HENkaku "
                     "settings!");
 
         Downloader downloader;
@@ -2117,7 +2117,7 @@ int main()
             has_pending_error = true;
         };
 
-        LOG("PKGj %s started", PKGI_VERSION);
+        LOG("PKGJ %s started", PKGI_VERSION);
 
         config = pkgi_load_config();
         pkgi_dialog_init();
@@ -2125,7 +2125,7 @@ int main()
         // Pick up installs that were queued for LiveArea during a previous run.
         bgdl_queue_size = static_cast<int>(bgdl_queue_load().size());
         if (bgdl_queue_size > 0)
-            LOGF("{} install(s) waiting in the PKGj queue", bgdl_queue_size);
+            LOGF("{} install(s) waiting in the PKGJ queue", bgdl_queue_size);
 
         font_height = pkgi_text_height("M");
         avail_height = VITA_HEIGHT - 3 * (font_height + PKGI_MAIN_HLINE_EXTRA);
@@ -2341,7 +2341,7 @@ int main()
                             pkgi_dialog_message(
                                     fmt::format(
                                             "{} queued in LiveArea (from the "
-                                            "PKGj queue).",
+                                            "PKGJ queue).",
                                             queued_name)
                                             .c_str());
                         }
@@ -2351,7 +2351,7 @@ int main()
                             // current job yet, so retry a few times before
                             // giving up and telling the user.
                             LOGFW(
-                                    "PKGj queue: could not queue the next "
+                                    "PKGJ queue: could not queue the next "
                                     "install: {}",
                                     feed_error);
                             bgdl_next_feed_check = now + 30000;
@@ -2360,11 +2360,11 @@ int main()
                                 bgdl_feed_disabled = true;
                                 pkgi_dialog_error(
                                         fmt::format(
-                                                "PKGj queue: could not queue "
+                                                "PKGJ queue: could not queue "
                                                 "the next install:\n{}\n\nCheck "
                                                 "the notifications panel, "
                                                 "ux0:bgdl and the free space, "
-                                                "then restart PKGj.",
+                                                "then restart PKGJ.",
                                                 feed_error)
                                                 .c_str());
                             }
@@ -2600,6 +2600,6 @@ int main()
         pkgi_end();
     }
 
-    LOG("PKGj shutting down");
+    LOG("PKGJ shutting down");
     pkgi_end();
 }

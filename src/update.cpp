@@ -72,7 +72,7 @@ void start_download()
 {
     try
     {
-        LOGF("Downloading PKGj update {}", release_tag);
+        LOGF("Downloading PKGJ update {}", release_tag);
 
         const auto filename = fmt::format(
                 "{}/pkgj-{}.vpk", pkgi_get_config_folder(), release_tag);
@@ -98,11 +98,11 @@ void start_download()
                 pkgi_write(file, data.data(), read);
             }
 
-            LOGF("PKGj update downloaded successfully");
+            LOGF("PKGJ update downloaded successfully");
         }
         catch (...)
         {
-            LOGF("PKGj update download failed, removing partial file");
+            LOGF("PKGJ update download failed, removing partial file");
             pkgi_rm(filename.c_str());
             throw;
         }
@@ -193,7 +193,7 @@ void update_thread()
 
         pkgi_dialog_question(
                 fmt::format(
-                        "New PKGj version {} is available!\nDo you want to "
+                        "New PKGJ version {} is available!\nDo you want to "
                         "download it?",
                         tag)
                         .c_str(),
