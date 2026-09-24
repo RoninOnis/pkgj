@@ -845,9 +845,9 @@ void GameView::printDiagnostic()
     {
         ImGui::TextColored(
                 Yellow,
-                "- A compatibility pack is installed but not by PKGj, please "
+                "- A compatibility pack is installed but not by PKGJ, please "
                 "make sure it matches the installed version or reinstall it "
-                "with PKGj");
+                "with PKGJ");
         ok = false;
     }
 
