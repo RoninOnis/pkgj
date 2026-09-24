@@ -1519,6 +1519,30 @@ void pkgi_start_download(
             pkgi_zrif_decode(item.zrif.c_str(), rif, message, sizeof(message)))
         {
             const bool is_pspemudrm_mode = MODE_IS_PSPEMU(mode);
+
+            // Classic install path: PKGj downloads the package and hands it to
+            // the promoter utility.  It is used for PSM/PSP content, and as a
+            // fallback when the LiveArea queue cannot be used.
+            auto queue_direct_download = [&]()
+            {
+                downloader.add(DownloadItem{
+                        mode_to_type(mode),
+                        item.name,
+                        item.content,
+                        item.url,
+                        item.zrif.empty()
+                                ? std::vector<uint8_t>{}
+                                : std::vector<uint8_t>(
+                                          rif, rif + PKGI_PSM_RIF_SIZE),
+                        item.has_digest ? std::vector<uint8_t>(
+                                                  item.digest.begin(),
+                                                  item.digest.end())
+                                        : std::vector<uint8_t>{},
+                        is_pspemudrm_mode &&
+                            psp_install_mode != PspInstallMode::LiveAreaPbp,
+                        pkgi_get_mode_partition(),
+                        ""});
+            };
 #ifndef PKGI_SIMULATOR
             const bool has_psp_bgdl =
                     is_pspemudrm_mode && pkgi_is_module_present("NoPspEmuDrm_kern");
@@ -1544,36 +1568,74 @@ void pkgi_start_download(
             if (mode == ModeGames || mode == ModeDlcs || mode == ModeDemos || mode == ModeThemes)
             {
 #endif
-                
-                pkgi_start_bgdl(
-                        mode_to_bgdl_type(mode),
-                        item.name,
-                        item.url,
-                        std::vector<uint8_t>(rif, rif + PKGI_PSM_RIF_SIZE));
-                pkgi_dialog_message(
-                        fmt::format(
-                                "Installation of {} queued in LiveArea",
-                                item.name)
-                                .c_str());
+                // The LiveArea queue talks to reverse engineered shell
+                // services: when they are not usable (firmware differences,
+                // missing exports, plugins) the install used to fail.  Fall
+                // back to the in-app download instead, except when the user
+                // explicitly asked for a LiveArea install.
+                const bool explicit_livearea =
+                        is_pspemudrm_mode &&
+                        psp_install_mode == PspInstallMode::LiveAreaPbp;
+
+                std::string livearea_error;
+                bool queued = false;
+
+                if (explicit_livearea)
+                {
+                    pkgi_start_bgdl(
+                            mode_to_bgdl_type(mode),
+                            item.name,
+                            item.url,
+                            std::vector<uint8_t>(rif, rif + PKGI_PSM_RIF_SIZE));
+                    queued = true;
+                }
+                else
+                {
+                    try
+                    {
+                        pkgi_start_bgdl(
+                                mode_to_bgdl_type(mode),
+                                item.name,
+                                item.url,
+                                std::vector<uint8_t>(
+                                        rif, rif + PKGI_PSM_RIF_SIZE));
+                        queued = true;
+                    }
+                    catch (const std::exception& e)
+                    {
+                        livearea_error = e.what();
+                    }
+                }
+
+                if (queued)
+                {
+                    LOGF("[{}] queued in LiveArea", item.content);
+                    pkgi_dialog_message(
+                            fmt::format(
+                                    "Installation of {} queued in LiveArea",
+                                    item.name)
+                                    .c_str());
+                }
+                else
+                {
+                    LOGFW(
+                            "[{}] LiveArea queue is unavailable ({}), falling "
+                            "back to the in-app downloader",
+                            item.content,
+                            livearea_error);
+                    queue_direct_download();
+                    pkgi_dialog_message(
+                            fmt::format(
+                                    "LiveArea queue unavailable, downloading "
+                                    "{} inside PKGj instead.\n\n{}\n\nKeep PKGj "
+                                    "open until the download finishes.",
+                                    item.name,
+                                    livearea_error)
+                                    .c_str());
+                }
             }
             else {
-                downloader.add(DownloadItem{
-                        mode_to_type(mode),
-                        item.name,
-                        item.content,
-                        item.url,
-                        item.zrif.empty()
-                                ? std::vector<uint8_t>{}
-                                : std::vector<uint8_t>(
-                                          rif, rif + PKGI_PSM_RIF_SIZE),
-                        item.has_digest ? std::vector<uint8_t>(
-                                                  item.digest.begin(),
-                                                  item.digest.end())
-                                        : std::vector<uint8_t>{},
-                        is_pspemudrm_mode &&
-                            psp_install_mode != PspInstallMode::LiveAreaPbp,
-                        pkgi_get_mode_partition(),
-                        ""});
+                queue_direct_download();
             }
         }
         else

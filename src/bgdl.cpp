@@ -3,6 +3,7 @@
 #include "file.hpp"
 #include "log.hpp"
 
+#include <psp2/kernel/error.h>
 #include <taihen.h>
 #include <vitasdk.h>
 
@@ -178,6 +179,8 @@ void init_download_class(scedownload_class* sceDownloadObj)
     int res = SceIpmi_4E255C31(
             (char*)&(sceDownloadObj->init_header.name), 0x1E00);
 
+    LOGF("SceIpmi_4E255C31(SceDownload, 0x1E00) = {:#08x}", res);
+
     if (res != 0xc4)
         throw formatEx<std::runtime_error>(
                 "SceIpmi_4E255C31 failed: {:#08x}", static_cast<uint32_t>(res));
@@ -193,15 +196,30 @@ void init_download_class(scedownload_class* sceDownloadObj)
             (char*)&(sceDownloadObj->init_header.name),
             sceDownloadObj->class_header,
             sceDownloadObj->class_header->buf10000);
+    LOGF("SceIpmi_B282B430(...) = {:#08x}", res);
     if (res != 0)
         throw formatEx<std::runtime_error>(
                 "SceIpmi_B282B430 init failed: {:#08x}",
                 static_cast<uint32_t>(res));
 
-    sceDownloadObj->init =
-            (SceDownloadInit)(*(sceDownloadObj->class_header->func_table))[1];
-    sceDownloadObj->change_state = (SceDownloadChangeState)(*(
-            sceDownloadObj->class_header->func_table))[5];
+    // The table comes straight from the shell service: if it is empty, the
+    // dereferences below would jump through a null pointer.
+    if (sceDownloadObj->class_header->func_table == nullptr ||
+        *(sceDownloadObj->class_header->func_table) == nullptr)
+        throw std::runtime_error(
+                "SceIpmi_B282B430 returned an empty function table");
+
+    auto* const func_table = *(sceDownloadObj->class_header->func_table);
+
+    sceDownloadObj->init = (SceDownloadInit)func_table[1];
+    sceDownloadObj->change_state = (SceDownloadChangeState)func_table[5];
+
+    LOGF(
+            "SceDownload table: init {:#x}, change_state {:#x}, shell_func_8 "
+            "{:#x}",
+            static_cast<uintptr_t>(func_table[1]),
+            static_cast<uintptr_t>(func_table[5]),
+            static_cast<uintptr_t>(func_table[8]));
 
     res = sceDownloadObj->init(
             sceDownloadObj->class_header->func_table,
@@ -209,6 +227,7 @@ void init_download_class(scedownload_class* sceDownloadObj)
             0x14,
             &(sceDownloadObj->init_header),
             2);
+    LOGF("SceDownload init(...) = {:#08x}", res);
     if (res != 0)
         throw formatEx<std::runtime_error>(
                 "SceDownload init failed: {:#08x}", static_cast<uint32_t>(res));
@@ -223,6 +242,8 @@ void scedownload_start_with_rif(
 {
     int32_t result = 0;
     int32_t bgdlid = 1;
+
+    LOGF("queueing \"{}\" (type {}) in LiveArea: {}", title, type, url);
 
     sce_ipmi_download_param params;
     memset(&params, 0, sizeof(params));
@@ -244,7 +265,16 @@ void scedownload_start_with_rif(
     params.pBgdlId = (uint32_t*)&bgdlid; // points to -1
     params.unk_5 = 4;
     params.result = &result;
+
+    if (sceDownloadObj->class_header->func_table == nullptr ||
+        *(sceDownloadObj->class_header->func_table) == nullptr)
+        throw std::runtime_error("SceDownload class is not initialized");
+
     params.shell_func_8 = (*(sceDownloadObj->class_header->func_table))[8];
+
+    if (params.shell_func_8 == 0)
+        throw std::runtime_error(
+                "SceDownload did not provide the download callback");
 
     copy_cstr(params.init.addr_DC0->url, url);
     copy_cstr(params.init.addr_DC0->license_path, rif);
@@ -259,6 +289,12 @@ void scedownload_start_with_rif(
             params.init.ptr_to_dc0_ptr,
             1,
             params);
+
+    LOGF(
+            "change_state(0x12340012) = {:#08x}, result {:#08x}, bgdlid {}",
+            static_cast<uint32_t>(res),
+            static_cast<uint32_t>(result),
+            bgdlid);
 
     if (res < 0)
         throw formatEx<std::runtime_error>(
@@ -287,6 +323,12 @@ void scedownload_start_with_rif(
 
     res = sceDownloadObj->change_state(
             sceDownloadObj->class_header->func_table, 0x12340007, 0, 0, params);
+
+    LOGF(
+            "change_state(0x12340007) = {:#08x}, result {:#08x}",
+            static_cast<uint32_t>(res),
+            static_cast<uint32_t>(result));
+
     if (res < 0)
         throw formatEx<std::runtime_error>(
                 "SceDownload second change_state failed: {:#08x}",
@@ -306,25 +348,86 @@ std::unique_ptr<scedownload_class> new_scedownload()
     // Every step here used to be unchecked: a failed module load or import
     // left the function pointers null and the calls below jumped through a
     // null pointer.
+    //
+    // Note that the shell itself owns this library, so the load is *expected*
+    // to fail on a normal console: the kernel refuses to map a second, older
+    // copy of a library that is already resident and reports
+    // MODULEMGR_OLD_LIB (0x8002D013) or MODULEMGR_STARTED (0x8002D014).  That
+    // is not an error for us, we only need the exports below, so keep going
+    // and let a real failure surface as a clear message further down.
     const int modid = sceKernelLoadStartModule(lib_path, 0, NULL, 0, NULL, NULL);
     if (modid < 0)
-        throw formatEx<std::runtime_error>(
-                "failed to load {}: {:#08x}",
+    {
+        if (modid == static_cast<int>(SCE_KERNEL_ERROR_MODULEMGR_OLD_LIB) ||
+            modid == static_cast<int>(SCE_KERNEL_ERROR_MODULEMGR_STARTED))
+            LOGFW(
+                    "{} is already resident ({:#08x}), using the loaded copy",
+                    lib_path,
+                    static_cast<uint32_t>(modid));
+        else
+            throw formatEx<std::runtime_error>(
+                    "failed to load {}: {:#08x}",
+                    lib_path,
+                    static_cast<uint32_t>(modid));
+    }
+    else
+    {
+        LOGF(
+                "{} loaded, modid {:#x}",
                 lib_path,
-                static_cast<uint32_t>(modid));
+                static_cast<unsigned>(modid));
+    }
+
+    // Diagnostic: if the module is not even visible in this process, the export
+    // lookups below cannot work and the LiveArea queue is unavailable.
+    {
+        tai_module_info_t info{};
+        info.size = sizeof(info);
+        const int res = taiGetModuleInfo("SceShellSvc", &info);
+        if (res < 0)
+            LOGFW(
+                    "taiGetModuleInfo(SceShellSvc) failed: {:#08x}",
+                    static_cast<uint32_t>(res));
+        else
+            LOGF(
+                    "SceShellSvc found: modid {:#x}, module nid {:#08x}, "
+                    "exports {:#x}-{:#x}",
+                    static_cast<unsigned>(info.modid),
+                    info.module_nid,
+                    static_cast<uintptr_t>(info.exports_start),
+                    static_cast<uintptr_t>(info.exports_end));
+    }
 
     auto import = [](uint32_t nid, const char* name) -> uintptr_t
     {
-        uintptr_t address = 0;
-        const int res = taiGetModuleExportFunc(
-                "SceShellSvc", 0xF4E34EDB, nid, &address);
-        if (res < 0 || address == 0)
-            throw formatEx<std::runtime_error>(
-                    "taiGetModuleExportFunc({}, {:#08x}) failed: {:#08x}",
+        // SceIpmi is library 0xF4E34EDB; if that specific lookup misses, retry
+        // with the "any library" wildcard so that a firmware difference ends up
+        // as a readable error instead of a crash.
+        const uint32_t libnids[] = {0xF4E34EDB, TAI_ANY_LIBRARY};
+        int last_res = 0;
+        for (const uint32_t libnid : libnids)
+        {
+            uintptr_t address = 0;
+            const int res = taiGetModuleExportFunc(
+                    "SceShellSvc", libnid, nid, &address);
+            LOGF(
+                    "taiGetModuleExportFunc({}, lib {:#08x}, nid {:#08x}) = "
+                    "{:#08x}, address {:#x}",
                     name,
+                    libnid,
                     nid,
-                    static_cast<uint32_t>(res));
-        return address;
+                    static_cast<uint32_t>(res),
+                    static_cast<uintptr_t>(address));
+            if (res >= 0 && address != 0)
+                return address;
+            last_res = res;
+        }
+
+        throw formatEx<std::runtime_error>(
+                "cannot import {} ({:#08x}) from SceShellSvc: {:#08x}",
+                name,
+                nid,
+                static_cast<uint32_t>(last_res));
     };
 
     SceIpmi_4E255C31 = reinterpret_cast<decltype(SceIpmi_4E255C31)>(
@@ -344,11 +447,17 @@ void pkgi_start_bgdl(
         const std::string& url,
         const std::vector<uint8_t>& rif)
 {
-    if (pkgi_list_dir_contents("ux0:bgdl/t").size() >= 32)
+    const auto pending = pkgi_list_dir_contents("ux0:bgdl/t").size();
+    if (pending >= 32)
         throw std::runtime_error(
                 "There are too many pending installation on your device, "
                 "install them from LiveArea's notifications or delete them to "
                 "be able to download more.");
+
+    LOGF(
+            "{} install(s) already pending in LiveArea, queueing \"{}\"",
+            pending,
+            title);
 
     static auto example_class = new_scedownload();
     std::string license_path = "ux0:bgdl/temp.dat";
@@ -363,6 +472,10 @@ void pkgi_start_bgdl(
             rif_size = PKGI_RIF_SIZE;
     }
     
+    LOGF(
+            "saving the {} byte license to {}",
+            static_cast<unsigned>(rif_size),
+            license_path);
     pkgi_save(license_path, rif.data(), rif_size);
     
     scedownload_start_with_rif(

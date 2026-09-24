@@ -607,6 +607,25 @@ void pkgi_start(void)
 
     pkgi_start_debug_log();
 
+    // Diagnostics: the LiveArea install path depends on the firmware and on
+    // the DRM plugins that are installed, so record both in the log.
+    {
+        SceKernelSystemSwVersion sw{};
+        sw.size = sizeof(sw);
+        if (sceKernelGetSystemSwVersion(&sw) >= 0)
+            LOG("firmware: %s (0x%08x)", sw.versionString, sw.version);
+        else
+            LOG_WARN("cannot read the firmware version");
+
+        static const char* const modules[] = {
+                "NoNpDrm", "NoPspEmuDrm_kern", "NoPsmDrm", "ref00d", "0syscall6"};
+        for (const char* module_name : modules)
+            LOG(
+                    "module %s: %s",
+                    module_name,
+                    pkgi_is_module_present(module_name) ? "present" : "missing");
+    }
+
     LOG("Initializing SSL");
     sceSslInit(1024 * 1024);
     LOG("Initializing HTTP");
