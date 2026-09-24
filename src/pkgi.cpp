@@ -132,6 +132,177 @@ std::string content_to_refresh;
 // Error text handed over from the downloader thread to the main loop.
 std::string pending_error_message;
 bool has_pending_error = false;
+
+// PKGj-side queue of installs waiting for a free LiveArea slot.
+//
+// The shell refuses a new background download while one is already pending
+// (change_state DC0 fails with 0x80103aXX), and the old code answered that by
+// silently downloading inside PKGj, which pins the app to the foreground.
+// Instead the install is parked here and pushed into LiveArea as soon as the
+// shell's queue is empty again.
+struct BgdlQueueEntry
+{
+    int type = 0;
+    std::string content;
+    std::string name;
+    std::string url;
+    std::string zrif;
+};
+
+int bgdl_queue_size = 0;
+bool bgdl_feed_disabled = false;
+int bgdl_feed_failures = 0;
+uint32_t bgdl_next_feed_check = 0;
+
+std::string bgdl_queue_path()
+{
+    return std::string(pkgi_get_config_folder()) + "/bgdl_queue.txt";
+}
+
+std::vector<BgdlQueueEntry> bgdl_queue_load()
+{
+    std::vector<BgdlQueueEntry> entries;
+
+    std::vector<uint8_t> data;
+    try
+    {
+        data = pkgi_load(bgdl_queue_path());
+    }
+    catch (const std::exception&)
+    {
+        // no queue file yet: nothing to do
+        return entries;
+    }
+
+    const std::string text(data.begin(), data.end());
+    size_t start = 0;
+    while (start < text.size())
+    {
+        auto end = text.find('\n', start);
+        if (end == std::string::npos)
+            end = text.size();
+        const auto line = text.substr(start, end - start);
+        start = end + 1;
+        if (line.empty())
+            continue;
+
+        std::vector<std::string> fields;
+        size_t field_start = 0;
+        while (fields.size() < 4)
+        {
+            const auto separator = line.find('\t', field_start);
+            if (separator == std::string::npos)
+                break;
+            fields.push_back(line.substr(field_start, separator - field_start));
+            field_start = separator + 1;
+        }
+        if (fields.size() != 4)
+        {
+            LOGFW("bgdl queue: ignoring a malformed line");
+            continue;
+        }
+        fields.push_back(line.substr(field_start));
+
+        BgdlQueueEntry entry;
+        try
+        {
+            entry.type = std::stoi(fields[0]);
+        }
+        catch (const std::exception&)
+        {
+            LOGFW("bgdl queue: ignoring a line with an invalid type");
+            continue;
+        }
+        entry.content = fields[1];
+        entry.name = fields[2];
+        entry.url = fields[3];
+        entry.zrif = fields[4];
+        if (entry.content.empty() || entry.url.empty() || entry.zrif.empty())
+        {
+            LOGFW("bgdl queue: ignoring an incomplete line");
+            continue;
+        }
+
+        entries.push_back(entry);
+    }
+
+    return entries;
+}
+
+void bgdl_queue_save(const std::vector<BgdlQueueEntry>& entries)
+{
+    std::string text;
+    for (const auto& entry : entries)
+        text += fmt::format(
+                "{}\t{}\t{}\t{}\t{}\n",
+                entry.type,
+                entry.content,
+                entry.name,
+                entry.url,
+                entry.zrif);
+
+    pkgi_save(bgdl_queue_path(), text.data(), text.size());
+    bgdl_queue_size = static_cast<int>(entries.size());
+}
+
+void bgdl_queue_add(const BgdlQueueEntry& entry)
+{
+    auto entries = bgdl_queue_load();
+    for (const auto& existing : entries)
+        if (existing.content == entry.content)
+            return;
+
+    entries.push_back(entry);
+    bgdl_queue_save(entries);
+    LOGF(
+            "[{}] added to the PKGj queue ({} install(s) waiting)",
+            entry.content,
+            bgdl_queue_size);
+}
+
+int bgdl_pending_in_shell()
+{
+    return static_cast<int>(pkgi_list_dir_contents("ux0:bgdl/t").size());
+}
+
+// Hands the first queued entry over to LiveArea.  Throws when the shell
+// refuses it, in which case the entry stays in the queue.
+bool bgdl_queue_start_next()
+{
+    auto entries = bgdl_queue_load();
+    if (entries.empty())
+    {
+        bgdl_queue_size = 0;
+        return false;
+    }
+
+    const auto entry = entries.front();
+
+    uint8_t rif[PKGI_PSM_RIF_SIZE];
+    char error[256];
+    if (pkgi_zrif_decode(entry.zrif.c_str(), rif, error, sizeof(error)))
+    {
+        LOGFE(
+                "[{}] dropped from the PKGj queue: {}",
+                entry.content,
+                error);
+        entries.erase(entries.begin());
+        bgdl_queue_save(entries);
+        return false;
+    }
+
+    pkgi_start_bgdl(
+            entry.type,
+            entry.name,
+            entry.url,
+            std::vector<uint8_t>(rif, rif + PKGI_PSM_RIF_SIZE));
+
+    entries.erase(entries.begin());
+    bgdl_queue_save(entries);
+    LOGF("[{}] queued in LiveArea from the PKGj queue", entry.content);
+    return true;
+}
+
 void pkgi_reload();
 
 bool pkgi_overlay_is_open()
@@ -1261,6 +1432,12 @@ void pkgi_do_tail(Downloader& downloader)
                 sspeed.c_str(),
                 static_cast<int>(download_offset * 100 / download_size));
     }
+    else if (bgdl_queue_size > 0)
+        pkgi_snprintf(
+                text,
+                sizeof(text),
+                "Idle - PKGj queue: %d waiting for LiveArea",
+                bgdl_queue_size);
     else
         pkgi_snprintf(text, sizeof(text), "Idle");
 
@@ -1523,9 +1700,12 @@ void pkgi_start_download(
             // Classic install path: PKGj downloads the package and hands it to
             // the promoter utility.  It is used for PSM/PSP content, and as a
             // fallback when the LiveArea queue cannot be used.
-            auto queue_direct_download = [&]()
+            // The direct download is built by value: the dialog callbacks
+            // below fire after this function has returned, so they must not
+            // capture the locals (rif, item, mode) by reference.
+            auto make_direct_item = [&]()
             {
-                downloader.add(DownloadItem{
+                return DownloadItem{
                         mode_to_type(mode),
                         item.name,
                         item.content,
@@ -1541,7 +1721,12 @@ void pkgi_start_download(
                         is_pspemudrm_mode &&
                             psp_install_mode != PspInstallMode::LiveAreaPbp,
                         pkgi_get_mode_partition(),
-                        ""});
+                        ""};
+            };
+
+            auto queue_direct_download = [&]()
+            {
+                downloader.add(make_direct_item());
             };
 #ifndef PKGI_SIMULATOR
             const bool has_psp_bgdl =
@@ -1618,20 +1803,72 @@ void pkgi_start_download(
                 }
                 else
                 {
-                    LOGFW(
-                            "[{}] LiveArea queue is unavailable ({}), falling "
-                            "back to the in-app downloader",
-                            item.content,
-                            livearea_error);
-                    queue_direct_download();
-                    pkgi_dialog_message(
-                            fmt::format(
-                                    "LiveArea queue unavailable, downloading "
-                                    "{} inside PKGj instead.\n\n{}\n\nKeep PKGj "
-                                    "open until the download finishes.",
-                                    item.name,
-                                    livearea_error)
-                                    .c_str());
+                    const bool queue_busy =
+                            livearea_error.find("0x80103a") != std::string::npos;
+                    const auto pending = bgdl_pending_in_shell();
+
+                    if (queue_busy && !item.zrif.empty())
+                    {
+                        // The shell has no free download slot at the moment.
+                        // Do not silently take the download over: park it in
+                        // PKGj's own queue and let the user decide.
+                        LOGFW(
+                                "[{}] LiveArea refused the install ({}), {} "
+                                "install(s) already pending there",
+                                item.content,
+                                livearea_error,
+                                pending);
+
+                        const BgdlQueueEntry queued_entry{
+                                mode_to_bgdl_type(mode),
+                                item.content,
+                                item.name,
+                                item.url,
+                                item.zrif};
+                        const DownloadItem direct_item = make_direct_item();
+
+                        pkgi_dialog_question(
+                                fmt::format(
+                                        "LiveArea refused to queue {}:\n{}\n\n"
+                                        "{} install(s) are already waiting in "
+                                        "LiveArea.\n\nCancel or finish them in "
+                                        "the notifications panel, or let PKGj "
+                                        "wait - it will queue {} automatically "
+                                        "as soon as the LiveArea queue is "
+                                        "free.",
+                                        item.name,
+                                        livearea_error,
+                                        pending,
+                                        item.name),
+                                {Response{
+                                         "Queue in PKGj and wait",
+                                         [queued_entry]() {
+                                             bgdl_queue_add(queued_entry);
+                                         }},
+                                 Response{
+                                         "Download inside PKGj (keep it open)",
+                                         [&downloader, direct_item]() {
+                                             downloader.add(direct_item);
+                                         }},
+                                 Response{"Cancel", []() {}}});
+                    }
+                    else
+                    {
+                        LOGFW(
+                                "[{}] LiveArea queue is unavailable ({}), "
+                                "falling back to the in-app downloader",
+                                item.content,
+                                livearea_error);
+                        queue_direct_download();
+                        pkgi_dialog_message(
+                                fmt::format(
+                                        "LiveArea queue unavailable, downloading "
+                                        "{} inside PKGj instead.\n\n{}\n\nKeep PKGj "
+                                        "open until the download finishes.",
+                                        item.name,
+                                        livearea_error)
+                                        .c_str());
+                    }
                 }
             }
             else {
@@ -1684,6 +1921,11 @@ int main()
 
         config = pkgi_load_config();
         pkgi_dialog_init();
+
+        // Pick up installs that were queued for LiveArea during a previous run.
+        bgdl_queue_size = static_cast<int>(bgdl_queue_load().size());
+        if (bgdl_queue_size > 0)
+            LOGF("{} install(s) waiting in the PKGj queue", bgdl_queue_size);
 
         font_height = pkgi_text_height("M");
         avail_height = VITA_HEIGHT - 3 * (font_height + PKGI_MAIN_HLINE_EXTRA);
@@ -1861,6 +2103,75 @@ int main()
             }
             if (!error_to_show.empty())
                 pkgi_dialog_error(error_to_show.c_str());
+
+            // Push the next entry of PKGj's own queue into LiveArea once the
+            // shell has a free slot again.  The shell services are only ever
+            // touched from the main thread, and never while another download
+            // (in-app or in LiveArea) is running.
+            if (!bgdl_feed_disabled && bgdl_queue_size > 0 &&
+                !pkgi_dialog_is_open() && !pkgi_overlay_is_open())
+            {
+                const auto now = pkgi_time_msec();
+                if (static_cast<int32_t>(now - bgdl_next_feed_check) >= 0)
+                {
+                    bgdl_next_feed_check = now + 5000;
+                    if (!downloader.get_current_download().has_value() &&
+                        bgdl_pending_in_shell() == 0)
+                    {
+                        std::string queued_name;
+                        std::string feed_error;
+                        try
+                        {
+                            const auto entries = bgdl_queue_load();
+                            if (!entries.empty())
+                            {
+                                const auto name = entries.front().name;
+                                if (bgdl_queue_start_next())
+                                    queued_name = name;
+                            }
+                        }
+                        catch (const std::exception& e)
+                        {
+                            feed_error = e.what();
+                        }
+
+                        if (!queued_name.empty())
+                        {
+                            bgdl_feed_failures = 0;
+                            pkgi_dialog_message(
+                                    fmt::format(
+                                            "{} queued in LiveArea (from the "
+                                            "PKGj queue).",
+                                            queued_name)
+                                            .c_str());
+                        }
+                        else if (!feed_error.empty())
+                        {
+                            // The shell may simply not have registered its
+                            // current job yet, so retry a few times before
+                            // giving up and telling the user.
+                            LOGFW(
+                                    "PKGj queue: could not queue the next "
+                                    "install: {}",
+                                    feed_error);
+                            bgdl_next_feed_check = now + 30000;
+                            if (++bgdl_feed_failures >= 3)
+                            {
+                                bgdl_feed_disabled = true;
+                                pkgi_dialog_error(
+                                        fmt::format(
+                                                "PKGj queue: could not queue "
+                                                "the next install:\n{}\n\nCheck "
+                                                "the notifications panel, "
+                                                "ux0:bgdl and the free space, "
+                                                "then restart PKGj.",
+                                                feed_error)
+                                                .c_str());
+                            }
+                        }
+                    }
+                }
+            }
 
             // Apply a reload requested by a background thread, but only now:
             // between frames and only when nothing is showing database data.
