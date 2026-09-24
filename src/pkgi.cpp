@@ -1126,7 +1126,7 @@ void pkgi_do_head(void)
     const char* version = PKGI_VERSION;
 
     char title[256];
-    pkgi_snprintf(title, sizeof(title), "PKGJ v%s", version);
+    pkgi_snprintf(title, sizeof(title), "PKGj v%s", version);
     pkgi_draw_text(0, 0, PKGI_COLOR_TEXT_HEAD, title);
 
     pkgi_draw_rect(
@@ -1627,7 +1627,7 @@ void pkgi_start_download(
                     pkgi_dialog_message(
                             fmt::format(
                                     "LiveArea queue unavailable, downloading "
-                                    "{} inside PKGJ instead.\n\n{}\n\nKeep PKGJ "
+                                    "{} inside PKGj instead.\n\n{}\n\nKeep PKGj "
                                     "open until the download finishes.",
                                     item.name,
                                     livearea_error)
@@ -1659,7 +1659,7 @@ int main()
     {
         if (!pkgi_is_unsafe_mode())
             throw std::runtime_error(
-                    "PKGJ requires unsafe mode to be enabled in HENkaku "
+                    "PKGj requires unsafe mode to be enabled in HENkaku "
                     "settings!");
 
         Downloader downloader;
@@ -1680,7 +1680,7 @@ int main()
             has_pending_error = true;
         };
 
-        LOG("PKGJ %s started", PKGI_VERSION);
+        LOG("PKGj %s started", PKGI_VERSION);
 
         config = pkgi_load_config();
         pkgi_dialog_init();
@@ -2089,6 +2089,6 @@ int main()
         pkgi_end();
     }
 
-    LOG("PKGJ shutting down");
+    LOG("PKGj shutting down");
     pkgi_end();
 }

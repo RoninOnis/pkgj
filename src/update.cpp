@@ -8,7 +8,7 @@
 #include <vector>
 
 // GitHub Releases API — latest release for toaster-code/pkgj
-#define PKGJ_RELEASES_API \
+#define PKGj_RELEASES_API \
     "https://api.github.com/repos/toaster-code/pkgj/releases/latest"
 
 namespace
@@ -72,7 +72,7 @@ void start_download()
 {
     try
     {
-        LOGF("Downloading PKGJ update {}", release_tag);
+        LOGF("Downloading PKGj update {}", release_tag);
 
         const auto filename = fmt::format(
                 "{}/pkgj-{}.vpk", pkgi_get_config_folder(), release_tag);
@@ -98,11 +98,11 @@ void start_download()
                 pkgi_write(file, data.data(), read);
             }
 
-            LOGF("PKGJ update downloaded successfully");
+            LOGF("PKGj update downloaded successfully");
         }
         catch (...)
         {
-            LOGF("PKGJ update download failed, removing partial file");
+            LOGF("PKGj update download failed, removing partial file");
             pkgi_rm(filename.c_str());
             throw;
         }
@@ -133,11 +133,11 @@ void update_thread()
             pkgi_sleep(20);
         }
 
-        LOGF("Checking for updates at: {}", PKGJ_RELEASES_API);
+        LOGF("Checking for updates at: {}", PKGj_RELEASES_API);
 
         // Fetch the GitHub Releases JSON
         CurlHttp http;
-        http.start(PKGJ_RELEASES_API, 0);
+        http.start(PKGj_RELEASES_API, 0);
 
         constexpr size_t MAX_BYTES = 256 * 1024;
         std::vector<uint8_t> buf;
@@ -193,7 +193,7 @@ void update_thread()
 
         pkgi_dialog_question(
                 fmt::format(
-                        "New PKGJ version {} is available!\nDo you want to "
+                        "New PKGj version {} is available!\nDo you want to "
                         "download it?",
                         tag)
                         .c_str(),
