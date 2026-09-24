@@ -7,6 +7,24 @@
 #include <algorithm>
 #include <cstring>
 
+namespace
+{
+// Certificate verification is enabled whenever the platform can do it.  Some
+// Vita firmwares ship no usable CA store; there the handshake fails for
+// perfectly valid certificates, so those errors fall back to the previous
+// behaviour (no verification) *once* and the fact is remembered, instead of
+// disabling verification for every request up front.
+bool tls_verification_usable = true;
+
+bool is_certificate_error(CURLcode code)
+{
+    return code == CURLE_PEER_FAILED_VERIFICATION ||
+           code == CURLE_SSL_CACERT_BADFILE ||
+           code == CURLE_SSL_CERTPROBLEM ||
+           code == CURLE_SSL_CONNECT_ERROR;
+}
+} // namespace
+
 // ---------------------------------------------------------------------------
 
 CurlHttp::CurlHttp(const std::atomic<bool>* external_abort)
@@ -42,8 +60,9 @@ void CurlHttp::start(const std::string& url, uint64_t offset)
     curl_easy_setopt(_curl, CURLOPT_USERAGENT,        "libhttp/3.65 (PS Vita)");
     curl_easy_setopt(_curl, CURLOPT_FOLLOWLOCATION,   1L);
     curl_easy_setopt(_curl, CURLOPT_MAXREDIRS,        5L);
-    curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYPEER,   0L);
-    curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYHOST,   0L);
+    const bool verify = tls_verification_usable;
+    curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYPEER,   verify ? 1L : 0L);
+    curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYHOST,   verify ? 2L : 0L);
     curl_easy_setopt(_curl, CURLOPT_CONNECTTIMEOUT,   30L);
     curl_easy_setopt(_curl, CURLOPT_TIMEOUT,          60L);
     curl_easy_setopt(_curl, CURLOPT_ERRORBUFFER,      _err_buf);
@@ -59,7 +78,23 @@ void CurlHttp::start(const std::string& url, uint64_t offset)
         curl_easy_setopt(_curl, CURLOPT_RANGE, range.c_str());
     }
 
-    const CURLcode res = curl_easy_perform(_curl);
+    CURLcode res = curl_easy_perform(_curl);
+
+    if (verify && is_certificate_error(res))
+    {
+        LOG_WARN(
+                "Certificate verification failed for %s (%s) — retrying "
+                "without verification, the connection is NOT authenticated",
+                url.c_str(),
+                curl_easy_strerror(res));
+        tls_verification_usable = false;
+        _body.clear();
+        _read_pos = 0;
+        std::memset(_err_buf, 0, sizeof(_err_buf));
+        curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(_curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        res = curl_easy_perform(_curl);
+    }
 
     curl_easy_getinfo(_curl, CURLINFO_RESPONSE_CODE, &_status_code);
 

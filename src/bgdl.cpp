@@ -141,6 +141,25 @@ int (*SceIpmi_B282B430)(
         scedownload_class_header* class_header,
         uint32_t* buf10000);
 
+// Bounded copy of a NUL-terminated string into one of the fixed-size buffers of
+// ipmi_download_param.  Those buffers are filled with values coming from the
+// (remote) package list, so a plain strcpy() could overflow them and overwrite
+// the neighbouring fields of that structure.
+template <size_t N>
+void copy_cstr(char (&dst)[N], const char* src)
+{
+    const size_t len = src ? std::strlen(src) : 0;
+    const size_t n   = len < N - 1 ? len : N - 1;
+    if (src)
+        std::memcpy(dst, src, n);
+    dst[n] = '\0';
+    if (len > n)
+        LOG_WARN(
+                "Value truncated to %u bytes: %s",
+                static_cast<unsigned>(n),
+                src);
+}
+
 void init_download_class(scedownload_class* sceDownloadObj)
 {
     memset(sceDownloadObj, 0, sizeof(scedownload_class));
@@ -227,10 +246,10 @@ void scedownload_start_with_rif(
     params.result = &result;
     params.shell_func_8 = (*(sceDownloadObj->class_header->func_table))[8];
 
-    strcpy((char*)params.init.addr_DC0->url, url);
-    strcpy((char*)params.init.addr_DC0->license_path, rif);
-    strcpy((char*)params.init.addr_DC0->title, title);
-    strcpy((char*)params.init.addr_DC0->icon_path, "ux0:bgdl/icon0.png");
+    copy_cstr(params.init.addr_DC0->url, url);
+    copy_cstr(params.init.addr_DC0->license_path, rif);
+    copy_cstr(params.init.addr_DC0->title, title);
+    copy_cstr(params.init.addr_DC0->icon_path, "ux0:bgdl/icon0.png");
 
     params.init.addr_DC0->type[0] = params.init.addr_DC0->type[1] = type;
 
@@ -284,18 +303,34 @@ std::unique_ptr<scedownload_class> new_scedownload()
 {
     char lib_path[] = "vs0:sys/external/libshellsvc.suprx";
 
-    sceKernelLoadStartModule(lib_path, 0, NULL, 0, NULL, NULL);
+    // Every step here used to be unchecked: a failed module load or import
+    // left the function pointers null and the calls below jumped through a
+    // null pointer.
+    const int modid = sceKernelLoadStartModule(lib_path, 0, NULL, 0, NULL, NULL);
+    if (modid < 0)
+        throw formatEx<std::runtime_error>(
+                "failed to load {}: {:#08x}",
+                lib_path,
+                static_cast<uint32_t>(modid));
 
-    taiGetModuleExportFunc(
-            "SceShellSvc",
-            0xF4E34EDB,
-            0x4E255C31,
-            (uintptr_t*)&SceIpmi_4E255C31);
-    taiGetModuleExportFunc(
-            "SceShellSvc",
-            0xF4E34EDB,
-            0xB282B430,
-            (uintptr_t*)&SceIpmi_B282B430);
+    auto import = [](uint32_t nid, const char* name) -> uintptr_t
+    {
+        uintptr_t address = 0;
+        const int res = taiGetModuleExportFunc(
+                "SceShellSvc", 0xF4E34EDB, nid, &address);
+        if (res < 0 || address == 0)
+            throw formatEx<std::runtime_error>(
+                    "taiGetModuleExportFunc({}, {:#08x}) failed: {:#08x}",
+                    name,
+                    nid,
+                    static_cast<uint32_t>(res));
+        return address;
+    };
+
+    SceIpmi_4E255C31 = reinterpret_cast<decltype(SceIpmi_4E255C31)>(
+            import(0x4E255C31, "SceIpmi_4E255C31"));
+    SceIpmi_B282B430 = reinterpret_cast<decltype(SceIpmi_B282B430)>(
+            import(0xB282B430, "SceIpmi_B282B430"));
 
     auto example_class = std::make_unique<scedownload_class>();
     init_download_class(example_class.get());

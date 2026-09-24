@@ -10,6 +10,7 @@
 struct vita2d_texture;
 #endif
 
+#include <memory>
 #include <string>
 
 // Fetches screenshots for a game from the PlayStation Store chihiro API.
@@ -60,7 +61,10 @@ private:
 
     Mutex  _mutex;
     bool   _abort{false};
-    Thread _thread;
+
+    // Created at the very end of the constructor: the worker reads the fields
+    // above immediately, so it must not start while they are still empty.
+    std::unique_ptr<Thread> _thread;
 
     void do_work(); // runs on background thread
 };

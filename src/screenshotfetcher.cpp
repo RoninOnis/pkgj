@@ -217,8 +217,9 @@ static bool save_to_file(
 
 ScreenshotFetcher::ScreenshotFetcher(const Config* config, const DbItem* item)
     : _mutex("ss_fetcher_mutex")
-    , _thread("ss_fetcher", [this] { do_work(); })
 {
+    // Everything the worker needs is copied out of the DbItem here, on the
+    // main thread, while the database still owns it.
     _titleid  = item->titleid;
     _folder   = (config && !config->thumbnail_folder.empty())
                 ? config->thumbnail_folder
@@ -232,6 +233,11 @@ ScreenshotFetcher::ScreenshotFetcher(const Config* config, const DbItem* item)
             country,
             language,
             item->content);
+
+    // Only now that _titleid/_folder/_json_url are filled in: the worker reads
+    // them right away, and it used to be started from the member-init list,
+    // i.e. before the body above had run.
+    _thread = std::make_unique<Thread>("ss_fetcher", [this] { do_work(); });
 }
 
 ScreenshotFetcher::~ScreenshotFetcher()
@@ -240,7 +246,8 @@ ScreenshotFetcher::~ScreenshotFetcher()
         std::lock_guard<Mutex> lk(_mutex);
         _abort = true;
     }
-    _thread.join();
+    if (_thread)
+        _thread->join();
     vita2d_wait_rendering_done();
     for (int i = 0; i < MAX_SCREENSHOTS; ++i)
         if (_slots[i].texture)

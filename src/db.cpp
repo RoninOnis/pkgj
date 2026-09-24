@@ -465,7 +465,17 @@ void TitleDatabase::reload(
                         [](const auto c) { return c != 0; }))
                 digest_array = pkgi_hexbytes(digest, SHA256_DIGEST_SIZE);
             else
+            {
                 bdigest = false;
+                // No digest in the database means the package cannot be
+                // integrity-checked at install time: say so instead of
+                // silently installing unverified data.
+                LOG_WARN(
+                        "no SHA256 digest for %s (%s): the package will be "
+                        "installed without an integrity check",
+                        titleid.c_str(),
+                        content.c_str());
+            }
 
             std::string full_name = name;
             if (!app_version.empty())

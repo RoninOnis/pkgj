@@ -95,8 +95,10 @@ public:
 
     ~Thread()
     {
+        // Do not detach: a detached worker keeps running after the object that
+        // owns it is gone, reading members that were already destroyed.
         if (_t.joinable())
-            _t.detach();
+            _t.join();
     }
 
     void join() { _t.join(); }
@@ -267,28 +269,39 @@ public:
         _tid = sceKernelCreateThread(
                 name.c_str(), &entry_point, 0xb0, 0x8000, 0, 0, nullptr);
         if (_tid < 0)
-        {
-            // TODO throw
-            LOG_ERR("Thread creation failed: err=0x%08x", _tid);
-        }
+            // A thread that cannot be created has no worker behind it, and
+            // every caller immediately relies on the worker running: surface
+            // the failure instead of continuing with a dead thread.
+            throw std::runtime_error("failed to create thread " + name);
+
         auto entryp = new EntryPoint(std::move(entry));
         const auto res = sceKernelStartThread(_tid, sizeof(entryp), &entryp);
         if (res < 0)
         {
             delete entryp;
-            // TODO throw
-            LOG_ERR("Thread start failed: err=0x%08x", res);
+            sceKernelDeleteThread(_tid);
+            _tid = -1;
+            throw std::runtime_error("failed to start thread " + name);
         }
     }
 
     ~Thread()
     {
+        // Deleting a thread that is still running frees the stack its entry
+        // point is executing on, so wait for it first (join() may never have
+        // been called).
+        int stat = 0;
+        const auto waited = sceKernelWaitThreadEnd(_tid, &stat, nullptr);
+        if (waited < 0)
+            LOG_ERR("Thread wait before deletion failed: err=0x%08x", waited);
+
         const auto res = sceKernelDeleteThread(_tid);
         if (res < 0)
         {
             // TODO assert
             LOG_ERR("Thread deletion failed: err=0x%08x", res);
         }
+        _tid = -1;
     }
 
     void join()

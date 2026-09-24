@@ -3,6 +3,7 @@
 #include "db.hpp"
 #include "thread.hpp"
 
+#include <memory>
 #include <string>
 
 // Fetches the long description for a game from the PlayStation Store (chihiro
@@ -20,6 +21,11 @@ public:
     };
 
     // Starts the background fetch immediately.
+    //
+    // The DbItem is only read during construction: the database can be
+    // reloaded (TitleDatabase::reload() clears the vector and destroys every
+    // item) while this fetch is still in flight, so holding a pointer to it
+    // from the worker thread would be a use-after-free.
     DescriptionFetcher(const DbItem* item);
     ~DescriptionFetcher();
 
@@ -29,14 +35,22 @@ public:
     std::string       get_description();
 
 private:
-    const DbItem* _item;
+    // Immutable snapshot of everything the worker thread needs.  Only written
+    // in the constructor, before the thread is started.
+    std::string _content;
+    std::string _titleid;
+    std::string _country;
+    std::string _language;
 
     Mutex       _mutex;
     bool        _abort{false};
     Status      _status{Status::Fetching};
     std::string _description;
 
-    Thread _thread;
+    // Created at the very end of the constructor: the worker reads the
+    // snapshot fields above immediately, so it must not be running yet when
+    // they are still uninitialized.
+    std::unique_ptr<Thread> _thread;
 
     void do_request();
 };

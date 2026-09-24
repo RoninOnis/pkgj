@@ -11,6 +11,11 @@ extern "C"
 #include "log.hpp"
 #include "logbuffer.hpp"
 #include "psx.hpp"
+#include "thread.hpp"
+
+#include <cstring>
+#include <ctime>
+#include <mutex>
 
 #include <fmt/format.h>
 
@@ -90,6 +95,47 @@ static int g_log_socket;
 
 #define PKGI_ERRNO_ENOENT (int)(0x80010000 + SCE_NET_ENOENT)
 
+// ---------------------------------------------------------------------------
+// Persistent log.
+//
+// The in-app log lives in memory only, so a crash leaves nothing to look at.
+// Every line is therefore also appended to <config>/log.txt, which survives a
+// crash and can be copied off the device (ux0:pkgj/log.txt).
+// ---------------------------------------------------------------------------
+
+static Mutex log_file_mutex("log_file_mutex");
+static bool  log_file_size_checked = false;
+
+static void pkgi_log_to_file(const char* line)
+{
+    std::lock_guard<Mutex> lock(log_file_mutex);
+
+    static const std::string path =
+            std::string(pkgi_get_config_folder()) + "/log.txt";
+
+    if (!log_file_size_checked)
+    {
+        log_file_size_checked = true;
+
+        // Diagnostic aid only: start over once it grows too big.
+        SceIoStat stat;
+        memset(&stat, 0, sizeof(stat));
+        if (sceIoGetstat(path.c_str(), &stat) >= 0 &&
+            static_cast<uint64_t>(stat.st_size) > 512 * 1024)
+            sceIoRemove(path.c_str());
+    }
+
+    const SceUID fd = sceIoOpen(
+            path.c_str(),
+            SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND,
+            0777);
+    if (fd < 0)
+        return;
+
+    sceIoWrite(fd, line, std::strlen(line));
+    sceIoClose(fd);
+}
+
 void pkgi_log(LogLevel level, const char* msg, ...)
 {
     char buffer[512];
@@ -106,6 +152,28 @@ void pkgi_log(LogLevel level, const char* msg, ...)
     buffer[len] = 0;
 
     pkgi_log_buffer_append(level, buffer);
+
+    {
+        char line[600];
+
+        std::time_t now = std::time(nullptr);
+        std::tm* tm_now = std::localtime(&now);
+        char timestamp[16] = "??:??:??";
+        if (tm_now)
+            snprintf(
+                    timestamp,
+                    sizeof(timestamp),
+                    "%02d:%02d:%02d",
+                    tm_now->tm_hour,
+                    tm_now->tm_min,
+                    tm_now->tm_sec);
+
+        const char* tag = level == LogLevel::Error  ? "ERR "
+                        : level == LogLevel::Warn ? "WARN"
+                                                  : "INFO";
+        snprintf(line, sizeof(line) - 2, "%s [%s] %s\n", timestamp, tag, buffer);
+        pkgi_log_to_file(line);
+    }
 
 #ifdef PKGI_ENABLE_LOGGING
     buffer[len] = '\n';

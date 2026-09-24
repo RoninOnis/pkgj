@@ -231,10 +231,18 @@ static std::string clean_html(const std::string& html)
 } // namespace
 
 DescriptionFetcher::DescriptionFetcher(const DbItem* item)
-    : _item(item)
-    , _mutex("desc_fetcher_mutex")
-    , _thread("desc_fetcher", [this] { do_request(); })
+    : _mutex("desc_fetcher_mutex")
 {
+    // Take a snapshot of everything the worker thread needs while the item is
+    // still guaranteed to be alive (we are on the main thread here, and the
+    // database cannot be reloaded while this constructor runs).
+    _content  = item->content;
+    _titleid  = item->titleid;
+    _country  = get_country(item);
+    _language = get_language(item);
+
+    // Only now is it safe to start the worker: it reads the fields above.
+    _thread = std::make_unique<Thread>("desc_fetcher", [this] { do_request(); });
 }
 
 DescriptionFetcher::~DescriptionFetcher()
@@ -243,7 +251,8 @@ DescriptionFetcher::~DescriptionFetcher()
         std::lock_guard<Mutex> lock(_mutex);
         _abort = true;
     }
-    _thread.join();
+    if (_thread)
+        _thread->join();
 }
 
 DescriptionFetcher::Status DescriptionFetcher::get_status()
@@ -268,8 +277,8 @@ void DescriptionFetcher::do_request()
                 return;
         }
 
-        const auto country  = get_country(_item);
-        const auto language = get_language(_item);
+        const auto& country  = _country;
+        const auto& language = _language;
 
         // Chihiro container endpoint — returns a JSON object that includes
         // "long_desc" (and "short_desc" as fallback).
@@ -278,7 +287,7 @@ void DescriptionFetcher::do_request()
                 "00_09_000/container/{}/{}/19/{}",
                 country,
                 language,
-                _item->content);
+                _content);
 
         CurlHttp http;
         try
@@ -288,7 +297,7 @@ void DescriptionFetcher::do_request()
         catch (const std::exception& e)
         {
             LOGFW("[DescriptionFetcher] HTTP start failed for {}: {}",
-                  _item->titleid,
+                  _titleid,
                   e.what());
             std::lock_guard<Mutex> lock(_mutex);
             _status = Status::Error;
@@ -357,7 +366,7 @@ void DescriptionFetcher::do_request()
     catch (const std::exception& e)
     {
         LOGFW("[DescriptionFetcher] exception for {}: {}",
-              _item->titleid,
+              _titleid,
               e.what());
         std::lock_guard<Mutex> lock(_mutex);
         _status = Status::Error;

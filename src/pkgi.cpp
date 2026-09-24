@@ -81,7 +81,34 @@ int bottom_y;
 char search_text[256];
 char error_state[256];
 
-std::vector<DbItem *> selected_items; 
+// Content IDs of the DLC entries the user has marked for batch install.
+//
+// Content IDs are stored instead of DbItem pointers on purpose: reloading the
+// database (TitleDatabase::reload() clears its vector and destroys every item)
+// would leave raw pointers dangling.  Anything that needs the item looks it up
+// again with db->get_by_content().
+std::vector<std::string> selected_contents;
+
+static bool pkgi_content_is_selected(const std::string& content)
+{
+    return std::find(
+                   selected_contents.begin(),
+                   selected_contents.end(),
+                   content) != selected_contents.end();
+}
+
+// A database reload destroys every DbItem.  The UI walks that vector while
+// drawing and several views (game view, fetchers, the DLC selection) refer to
+// its entries, so a reload must only ever happen on the main thread between
+// frames, and never while a view or dialog that shows database data is open.
+// Background threads (the refresh thread, the downloader) therefore only
+// request a reload through this flag and the main loop performs it.
+static std::atomic<bool> pending_db_reload{false};
+
+void pkgi_request_reload()
+{
+    pending_db_reload = true;
+}
 
 // used for multiple things actually
 Mutex refresh_mutex("refresh_mutex");
@@ -101,6 +128,10 @@ std::unique_ptr<AnnotationDatabase> annotation_db;
 bool need_refresh = true;
 bool runtime_install_queued = false;
 std::string content_to_refresh;
+
+// Error text handed over from the downloader thread to the main loop.
+std::string pending_error_message;
+bool has_pending_error = false;
 void pkgi_reload();
 
 bool pkgi_overlay_is_open()
@@ -422,10 +453,11 @@ void pkgi_refresh_thread(void)
                         http.get(), config.comppack_url + "entries_patch.txt");
             }
         }
-        first_item = 0;
-        selected_item = 0;
-        configure_db(db.get(), search_active ? search_text : NULL, &config);
-        pkgi_apply_annotations();
+        // Do NOT rebuild the database here: this runs on the refresh thread,
+        // and clearing the item vector while the main thread is drawing the
+        // list (or while the game view holds an item) crashes the app.  The
+        // main loop picks the request up between frames instead.
+        pkgi_request_reload();
     }
     catch (const std::exception& e)
     {
@@ -851,7 +883,7 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
                 VITA_WIDTH - PKGI_MAIN_SCROLL_WIDTH - PKGI_MAIN_SCROLL_PADDING -
                         PKGI_MAIN_COLUMN_PADDING - sizew - col_name,
                 line_height);
-        item->selected = std::find(selected_items.begin(), selected_items.end(), item) != selected_items.end();
+        item->selected = pkgi_content_is_selected(item->content);
         {
             std::string display_name;
             if (item->user_flag != UserFlag::None)
@@ -958,7 +990,7 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
         }
         else if (mode == ModeDlcs)
         {
-            if (selected_items.empty())
+            if (selected_contents.empty())
             {
                 if (downloader.is_in_queue(mode_to_type(mode), item->content))
                 {
@@ -970,17 +1002,25 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
             }
             else
             {
-                for(size_t i = 0; i < selected_items.size(); i++)
+                // Copy the selection first: pkgi_install_package() can queue a
+                // question dialog whose callback runs later, and the list is
+                // cleared before it does.
+                const auto contents = selected_contents;
+                selected_contents.clear();
+                for (const auto& content : contents)
                 {
-                    if (downloader.is_in_queue(mode_to_type(mode), selected_items[i]->content))
+                    DbItem* selected = db->get_by_content(content.c_str());
+                    if (!selected)
+                        continue; // database was reloaded meanwhile
+                    if (downloader.is_in_queue(mode_to_type(mode), selected->content))
                     {
-                        downloader.remove_from_queue(mode_to_type(mode), selected_items[i]->content);
-                        selected_items[i]->content = PresenceUnknown;
+                        downloader.remove_from_queue(
+                                mode_to_type(mode), selected->content);
+                        selected->presence = PresenceUnknown;
                     }
                     else
-                        pkgi_install_package(downloader, selected_items[i]);
+                        pkgi_install_package(downloader, selected);
                 }
-                selected_items.clear();
             }
                 
         }
@@ -1027,13 +1067,19 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
         {
             input->pressed &= ~PKGI_BUTTON_S;
             DbItem* item = db->get(selected_item);
-            if(std::find(selected_items.begin(), selected_items.end(), item) != selected_items.end())
+            if (pkgi_content_is_selected(item->content))
             {
-                selected_items.erase(std::find(selected_items.begin(),selected_items.end(), item));
+                selected_contents.erase(
+                        std::remove(
+                                selected_contents.begin(),
+                                selected_contents.end(),
+                                item->content),
+                        selected_contents.end());
             }
-            else if(selected_items.size() < 32 - pkgi_list_dir_contents("ux0:bgdl/t").size())
+            else if (selected_contents.size() <
+                     32 - pkgi_list_dir_contents("ux0:bgdl/t").size())
             {
-                selected_items.push_back(item);
+                selected_contents.push_back(item->content);
             }
         }
     }
@@ -1221,7 +1267,7 @@ void pkgi_do_tail(Downloader& downloader)
     pkgi_draw_text(0, bottom_y, PKGI_COLOR_TEXT_TAIL, text);
     if (mode == ModeDlcs) 
     {
-        pkgi_snprintf(text, sizeof(text), "Selected items: %d/%d", selected_items.size(), 32 - pkgi_list_dir_contents("ux0:bgdl/t").size());
+        pkgi_snprintf(text, sizeof(text), "Selected items: %d/%d", static_cast<int>(selected_contents.size()), 32 - pkgi_list_dir_contents("ux0:bgdl/t").size());
         pkgi_draw_text((VITA_WIDTH - pkgi_text_width(text)) / 2, bottom_y, PKGI_COLOR_TEXT_TAIL, text);
     }
     const auto second_line = bottom_y + font_height + PKGI_MAIN_ROW_PADDING;
@@ -1362,8 +1408,21 @@ void pkgi_apply_annotations()
 
 void pkgi_reload()
 {
+    // Never rebuild the database under a view that may be showing items from
+    // it: the vector is about to be cleared and every DbItem destroyed.  The
+    // reload is retried by the main loop once the view is gone.
+    if (pkgi_overlay_is_open() || pkgi_dialog_is_open() || pkgi_menu_is_open())
+    {
+        LOG("Database reload postponed: a view is still open");
+        pending_db_reload = true;
+        return;
+    }
+
     try
     {
+        pending_db_reload = false;
+        first_item = 0;
+        selected_item = 0;
         configure_db(db.get(), search_active ? search_text : NULL, &config);
         pkgi_apply_annotations();
     }
@@ -1551,11 +1610,15 @@ int main()
         };
         downloader.error = [](const std::string& error)
         {
-            // FIXME this runs on the wrong thread
-            pkgi_dialog_error(("Download failure: " + error).c_str());
+            // This callback runs on the downloader thread.  Touching the
+            // dialog (and thus the UI state) from here is not safe, so the
+            // message is handed over to the main loop instead.
+            std::lock_guard<Mutex> lock(refresh_mutex);
+            pending_error_message = "Download failure: " + error;
+            has_pending_error = true;
         };
 
-        LOG("PKGj started");
+        LOG("PKGj %s started", PKGI_VERSION);
 
         config = pkgi_load_config();
         pkgi_dialog_init();
@@ -1723,6 +1786,30 @@ int main()
                 need_refresh = false;
             }
 
+            // Show an error reported by the downloader thread.  Done here so
+            // that the dialog is only ever touched from the main thread.
+            std::string error_to_show;
+            {
+                std::lock_guard<Mutex> lock(refresh_mutex);
+                if (has_pending_error)
+                {
+                    error_to_show.swap(pending_error_message);
+                    has_pending_error = false;
+                }
+            }
+            if (!error_to_show.empty())
+                pkgi_dialog_error(error_to_show.c_str());
+
+            // Apply a reload requested by a background thread, but only now:
+            // between frames and only when nothing is showing database data.
+            if (pending_db_reload && !pkgi_overlay_is_open() &&
+                !pkgi_dialog_is_open() && !pkgi_menu_is_open())
+            {
+                pkgi_reload();
+                pkgi_mark_all_items_unknown();
+                reposition();
+            }
+
             ImGui::NewFrame();
 
             pkgi_draw_texture(background, 0, 0);
@@ -1848,7 +1935,7 @@ int main()
                 {
                     MenuResult mres = pkgi_menu_result();
                     if (mres != MenuResultCancel)
-                        selected_items.clear();
+                        selected_contents.clear();
                     switch (mres)
                     {
                     case MenuResultSearch:
