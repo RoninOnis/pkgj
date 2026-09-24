@@ -1,14 +1,27 @@
 #include "curlhttp.hpp"
 
 #include "log.hpp"
+#include "thread.hpp"
 
 #include <fmt/format.h>
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 namespace
 {
+// OpenSSL, который поставляется с VitaSDK, собран без OPENSSL_THREADS: его
+// состояние RAND не защищено блокировками (CRYPTO_lock вызывается, но ни один
+// колбэк блокировки не зарегистрирован, поэтому он ничего не делает), а в
+// ssleay_rand_add() при этом остаётся assert(md_c[1] == md_count[1]).
+// Ассерт держится только пока энтропию добавляет один поток: PKGj запускает
+// несколько фетчеров одновременно (описания, обложки, скриншоты, проверка
+// обновлений), и при перекрытии двух TLS-рукопожатий он срабатывает →
+// abort() → udf #255 → падение приложения с C2-12828-1.
+// Поэтому через OpenSSL пропускаем ровно один поток за раз.
+Mutex tls_mutex("pkgi_tls_mutex");
+
 // Certificate verification is enabled whenever the platform can do it.  Some
 // Vita firmwares ship no usable CA store; there the handshake fails for
 // perfectly valid certificates, so those errors fall back to the previous
@@ -77,6 +90,8 @@ void CurlHttp::start(const std::string& url, uint64_t offset)
         const auto range = fmt::format("{}-", offset);
         curl_easy_setopt(_curl, CURLOPT_RANGE, range.c_str());
     }
+
+    std::lock_guard<Mutex> tls_lock(tls_mutex);
 
     CURLcode res = curl_easy_perform(_curl);
 
