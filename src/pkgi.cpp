@@ -55,6 +55,9 @@ namespace
 // forward declaration — defined later in this anonymous namespace
 void pkgi_apply_annotations();
 
+// forward declarations — defined later in this anonymous namespace
+void pkgi_install_selection(Downloader& downloader);
+
 typedef enum
 {
     StateError,
@@ -87,7 +90,19 @@ char error_state[256];
 // database (TitleDatabase::reload() clears its vector and destroys every item)
 // would leave raw pointers dangling.  Anything that needs the item looks it up
 // again with db->get_by_content().
+//
+// Since fix5 the same mechanism is used for multi-selecting games: SELECT
+// marks a game, OK queues the whole selection into LiveArea (or into PKGj's
+// own queue when the shell refuses).
 std::vector<std::string> selected_contents;
+
+// Whether SELECT-marks can be used in the current list mode: the marking keys
+// are shared with the annotation flags in the game modes.
+bool pkgi_selection_available()
+{
+    return mode == ModeDlcs || mode == ModeGames || mode == ModeDemos ||
+            mode == ModeThemes;
+}
 
 static bool pkgi_content_is_selected(const std::string& content)
 {
@@ -684,6 +699,125 @@ void do_download(Downloader& downloader, DbItem* item) {
     item->presence = PresenceUnknown;
 }
 
+// Queue every marked item into the LiveArea download queue in one go.
+//
+// A dedicated license file is used per entry (ux0:bgdl/pkgj_<content>.dat):
+// the shell copies it into the bgdlid folder when it accepts the job, and a
+// shared temp.dat would be overwritten by the next entry before that happens.
+//
+// Entries the shell refuses (busy queue) are parked in PKGj's own queue from
+// fix4; entries that fail validation are reported at the end.
+void pkgi_install_selection([[maybe_unused]] Downloader& downloader)
+{
+    // Copy the selection first: this function shows dialogs whose callbacks
+    // run after it returns, and the marks are cleared before that.
+    const auto contents = selected_contents;
+    selected_contents.clear();
+
+    const BgdlType bgdl_type = mode_to_bgdl_type(mode);
+
+    int queued = 0;
+    int parked = 0;
+    std::string first_error;
+    std::vector<BgdlQueueEntry> refused;
+
+    for (const auto& content : contents)
+    {
+        DbItem* item = db->get_by_content(content.c_str());
+        if (!item)
+            continue; // database was reloaded meanwhile
+
+        if (item->zrif.empty())
+        {
+            LOGFW("[{}] has no license, skipping the batch install",
+                 item->content);
+            if (first_error.empty())
+                first_error =
+                        fmt::format("{} has no license", item->name);
+            continue;
+        }
+
+        uint8_t rif[PKGI_PSM_RIF_SIZE];
+        char message[256];
+        if (pkgi_zrif_decode(item->zrif.c_str(), rif, message, sizeof(message)))
+        {
+            LOGFW(
+                    "[{}] invalid license in the batch install: {}",
+                    item->content,
+                    message);
+            if (first_error.empty())
+                first_error = fmt::format("{}: {}", item->name, message);
+            continue;
+        }
+
+        try
+        {
+            pkgi_start_bgdl(
+                    bgdl_type,
+                    item->name,
+                    item->url,
+                    std::vector<uint8_t>(rif, rif + PKGI_PSM_RIF_SIZE),
+                    fmt::format("ux0:bgdl/pkgj_{}.dat", item->content));
+            ++queued;
+            item->presence = PresenceUnknown;
+            LOGF("[{}] queued in LiveArea from the selection", item->content);
+        }
+        catch (const std::exception& e)
+        {
+            LOGFW(
+                    "[{}] the shell refused the batch entry: {}",
+                    item->content,
+                    e.what());
+            refused.push_back(BgdlQueueEntry{
+                    bgdl_type,
+                    item->content,
+                    item->name,
+                    item->url,
+                    item->zrif});
+        }
+    }
+
+    for (const auto& entry : refused)
+    {
+        bgdl_queue_add(entry);
+        ++parked;
+    }
+
+    LOGF(
+            "batch install: {} queued in LiveArea, {} parked in the PKGj "
+            "queue, {} rejected",
+            queued,
+            parked,
+            first_error.empty() ? 0 : 1);
+
+    std::string text;
+    if (queued > 0)
+    {
+        text += fmt::format(
+                "{} install(s) queued in LiveArea.{}", queued,
+                parked > 0 || !first_error.empty() ? "\n\n" : "");
+    }
+    if (parked > 0)
+    {
+        text += fmt::format(
+                "{} install(s) are waiting for a free LiveArea slot - PKGj "
+                "will queue them automatically (keep PKGj open or restart it "
+                "later).{}",
+                parked,
+                !first_error.empty() ? "\n\n" : "");
+    }
+    if (!first_error.empty())
+        text += fmt::format("Not queued:\n{}", first_error);
+
+    if (text.empty())
+        text = "Nothing to install: no valid items were marked.";
+
+    if (parked > 0 || !first_error.empty())
+        pkgi_dialog_error(text.c_str());
+    else
+        pkgi_dialog_message(text.c_str());
+}
+
 void pkgi_install_package(Downloader& downloader, DbItem* item)
 {
     if (item->presence == PresenceInstalled)
@@ -738,6 +872,8 @@ void pkgi_set_mode(Mode set_mode)
     pkgi_reload();
     first_item = 0;
     selected_item = 0;
+    // Selection marks belong to the list they were made in.
+    selected_contents.clear();
 }
 
 void pkgi_refresh_list()
@@ -1144,7 +1280,13 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
             return;
         DbItem* item = db->get(selected_item);
 
-        if (mode == ModeGames || mode == ModePspGames)
+        if (mode == ModeGames && !selected_contents.empty())
+        {
+            // Batch install: games were marked with SELECT, OK now queues
+            // them all.  A single unmarked game still opens the GameView.
+            pkgi_install_selection(downloader);
+        }
+        else if (mode == ModeGames || mode == ModePspGames)
             gameview = std::make_unique<GameView>(
                 mode,
                     &config,
@@ -1157,7 +1299,10 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
                     annotation_db.get());
         else if (mode == ModeThemes || mode == ModeDemos)
         {
-            pkgi_start_download(downloader, *item);
+            if (!selected_contents.empty())
+                pkgi_install_selection(downloader);
+            else
+                pkgi_start_download(downloader, *item);
         }
         else if (mode == ModeDlcs)
         {
@@ -1253,6 +1398,45 @@ void pkgi_do_main(Downloader& downloader, pkgi_input* input)
                 selected_contents.push_back(item->content);
             }
         }
+    }
+    else if (input && (input->pressed & PKGI_BUTTON_SELECT) &&
+             pkgi_selection_available())
+    {
+        // SELECT marks/unmarks the current item for a batch install.  In the
+        // DLC list Square already does this; in the game lists Square is
+        // taken by the annotation flags, hence a separate button.
+        input->pressed &= ~PKGI_BUTTON_SELECT;
+        if (selected_item < db->count())
+        {
+            DbItem* item = db->get(selected_item);
+            if (pkgi_content_is_selected(item->content))
+            {
+                selected_contents.erase(
+                        std::remove(
+                                selected_contents.begin(),
+                                selected_contents.end(),
+                                item->content),
+                        selected_contents.end());
+            }
+            else if (selected_contents.size() <
+                     32 - pkgi_list_dir_contents("ux0:bgdl/t").size())
+            {
+                selected_contents.push_back(item->content);
+                LOGF(
+                        "[{}] marked for a batch install ({} marked)",
+                        item->content,
+                        selected_contents.size());
+            }
+        }
+    }
+    else if (input && (input->pressed & PKGI_BUTTON_START) &&
+             pkgi_selection_available())
+    {
+        // START clears every mark in the current list.
+        input->pressed &= ~PKGI_BUTTON_START;
+        if (!selected_contents.empty())
+            LOGF("clearing {} selection mark(s)", selected_contents.size());
+        selected_contents.clear();
     }
     else if (input && (input->pressed & PKGI_BUTTON_T))
     {
@@ -1442,10 +1626,20 @@ void pkgi_do_tail(Downloader& downloader)
         pkgi_snprintf(text, sizeof(text), "Idle");
 
     pkgi_draw_text(0, bottom_y, PKGI_COLOR_TEXT_TAIL, text);
-    if (mode == ModeDlcs) 
+    if (pkgi_selection_available() && !selected_contents.empty())
     {
-        pkgi_snprintf(text, sizeof(text), "Selected items: %d/%d", static_cast<int>(selected_contents.size()), 32 - pkgi_list_dir_contents("ux0:bgdl/t").size());
-        pkgi_draw_text((VITA_WIDTH - pkgi_text_width(text)) / 2, bottom_y, PKGI_COLOR_TEXT_TAIL, text);
+        pkgi_snprintf(
+                text,
+                sizeof(text),
+                "Selected: %d/%d",
+                static_cast<int>(selected_contents.size()),
+                32 - static_cast<int>(
+                              pkgi_list_dir_contents("ux0:bgdl/t").size()));
+        pkgi_draw_text(
+                (VITA_WIDTH - pkgi_text_width(text)) / 2,
+                bottom_y,
+                PKGI_COLOR_TEXT_TAIL,
+                text);
     }
     const auto second_line = bottom_y + font_height + PKGI_MAIN_ROW_PADDING;
 
@@ -1521,6 +1715,10 @@ void pkgi_do_tail(Downloader& downloader)
         bottom_text += PKGI_UTF8_T " menu ";
         if (mode == ModeDlcs)
             bottom_text += PKGI_UTF8_S " select";
+        else if (pkgi_selection_available())
+            bottom_text += "SELECT mark ";
+        if (pkgi_selection_available() && !selected_contents.empty())
+            bottom_text += "START clear";
     }
 
     pkgi_clip_set(

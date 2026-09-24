@@ -17,4 +17,5 @@ void pkgi_start_bgdl(
         const int type,
         const std::string& title,
         const std::string& url,
-        const std::vector<uint8_t>& rif);
+        const std::vector<uint8_t>& rif,
+        const std::string& license_path = "ux0:bgdl/temp.dat");

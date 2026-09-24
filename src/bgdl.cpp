@@ -445,7 +445,8 @@ void pkgi_start_bgdl(
         const int type,
         const std::string& title,
         const std::string& url,
-        const std::vector<uint8_t>& rif)
+        const std::vector<uint8_t>& rif,
+        const std::string& license_path)
 {
     const auto pending = pkgi_list_dir_contents("ux0:bgdl/t").size();
     if (pending >= 32)
@@ -460,7 +461,8 @@ void pkgi_start_bgdl(
             title);
 
     static auto example_class = new_scedownload();
-    std::string license_path = "ux0:bgdl/temp.dat";
+    const std::string default_path = "ux0:bgdl/temp.dat";
+    const std::string& path = license_path.empty() ? default_path : license_path;
 
     int rif_size = rif.size();
     if(rif_size >= PKGI_PSM_RIF_SIZE) {
@@ -475,13 +477,13 @@ void pkgi_start_bgdl(
     LOGF(
             "saving the {} byte license to {}",
             static_cast<unsigned>(rif_size),
-            license_path);
-    pkgi_save(license_path, rif.data(), rif_size);
-    
+            path);
+    pkgi_save(path, rif.data(), rif_size);
+
     scedownload_start_with_rif(
             example_class.get(),
             title.c_str(),
             url.c_str(),
-            (rif_size > 0) ? license_path.c_str() : "",
+            (rif_size > 0) ? path.c_str() : "",
             type);
 }
